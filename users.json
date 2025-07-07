@@ -1,0 +1,14 @@
+{
+  "u12345": {
+    "full_name": "Alex Smith",
+    "dob": "2016-04-22",
+    "postcode": "SW1A 1AA",
+    "phone": "07700900123"
+  },
+  "u67890": {
+    "full_name": "Sara Khan",
+    "dob": "2002-09-15",
+    "postcode": "E1 6AN",
+    "phone": "07700900234"
+  }
+}
