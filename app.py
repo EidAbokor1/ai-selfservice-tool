@@ -3,168 +3,161 @@ import json
 from dotenv import load_dotenv
 import os
 import requests
+from typing import Dict, Any
 
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENROUTER_API_KEY")
 
-def get_ai_response(message, history=None):
+def load_user_data() -> Dict[str, Any]:
+    """Load mock user data from JSON file"""
+    try:
+        with open("users.json") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.error("❌ Could not find users.json. Make sure it exists.")
+        st.stop()
+
+def get_ai_response(user_input: str, chat_history: list = None) -> str:
+    """Get AI response for IT support queries"""
     if not api_key:
         return "❌ API key not found. Please check your .env file."
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    if chat_history is None:
+        chat_history = []
 
-    if history is None:
-        history = []
+    # Load user data to provide context to AI
+    user_data = load_user_data()
+    
+    # Create system prompt with user database context
+    system_prompt = f"""You are an AI IT support assistant for a university. You can help with:
+1. Password resets
+2. Account unlocks  
+3. MFA (Multi-Factor Authentication) resets
 
-    messages = [{"role": "system", "content": "You are an IT support assistant helping users with login issues such as password resets, locked accounts, and MFA setup."}]
-    messages += history
-    messages.append({"role": "user", "content": message})
+IMPORTANT RULES:
+- Only help with login-related issues (password, locked accounts, MFA)
+- For anything else, politely redirect to IT desk
+- Be friendly, professional, and secure
+- Always verify user identity before making changes
+
+USER DATABASE (for verification):
+{json.dumps(user_data, indent=2)}
+
+PROCESS:
+1. Greet users and ask what they need help with
+2. If it's a login issue, ask for their student ID
+3. Verify their identity by asking for personal details (full name, postcode, DOB, phone)
+4. Only proceed with help after successful verification
+5. For password reset: Set temporary password "TempPass123!" and mention SMS sent
+6. For account unlock: Simply unlock the account
+7. For MFA reset: Reset their MFA and ask them to set it up again
+
+Always verify identity step by step. Don't accept all details at once."""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(chat_history)
+    messages.append({"role": "user", "content": user_input})
 
     data = {
         "model": "deepseek/deepseek-chat-v3",
-        "messages": messages
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 500
     }
 
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data, timeout=15)
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json=data,
+            timeout=15
+        )
+        
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
         else:
             return f"❌ AI service error: {response.status_code} - {response.text}"
+            
     except requests.exceptions.RequestException as e:
         return f"❌ Could not connect to the AI service: {e}"
 
-# Load mock user data
-try:
-    with open("users.json") as f:
-        user_data = json.load(f)
-except FileNotFoundError:
-    st.error("❌ Could not find users.json. Make sure it exists.")
-    st.stop()
+def main():
+    """Main Streamlit application"""
+    st.set_page_config(
+        page_title="AI IT Support",
+        page_icon="💬",
+        layout="centered"
+    )
+    
+    st.title("💬 AI IT Support Assistant")
+    st.markdown("*Get help with password resets, locked accounts, and MFA issues*")
+    
+    # Initialize session state
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {
+                "role": "assistant", 
+                "content": "👋 Hello! I'm your AI IT assistant. I can help with:\n\n• **Password resets**\n• **Locked accounts**\n• **MFA (Multi-Factor Authentication) issues**\n\nWhat can I help you with today?"
+            }
+        ]
+    
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
-st.set_page_config(page_title="AI Self-Service Tool")
-st.title("💬 AI Self-Service Login Assistant")
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-# Initialize session state
-if "stage" not in st.session_state:
-    st.session_state.stage = "greeting"
-    st.session_state.user_id = ""
-    st.session_state.temp_data = {}
-    st.session_state.identity_step = "full_name"  # for progressive checking
+    # Chat input
+    if user_input := st.chat_input("Type your message here..."):
+        # Add user message to chat
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+        # Get AI response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                ai_response = get_ai_response(user_input, st.session_state.chat_history)
+            st.markdown(ai_response)
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-def respond(message):
-    st.session_state.messages.append({"role": "assistant", "content": message})
-    with st.chat_message("assistant"):
-        st.markdown(message)
-
-# Show past messages
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# Get user input
-user_input = st.chat_input("Message the IT assistant...")
-
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.markdown(user_input)
-
-    stage = st.session_state.stage
-
-    if stage == "greeting":
-        ai_reply = get_ai_response("Greet the user and ask how you can help.", st.session_state.chat_history)
-        st.session_state.chat_history.append({"role": "user", "content": "Start of conversation"})
-        st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
-        respond(ai_reply)
-        st.session_state.stage = "awaiting_issue"
-
-    elif stage == "awaiting_issue":
+        # Add to chat history and session
         st.session_state.chat_history.append({"role": "user", "content": user_input})
-        ai_reply = get_ai_response(user_input, st.session_state.chat_history)
-        st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
-        respond(ai_reply)
+        st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
+        st.session_state.messages.append({"role": "assistant", "content": ai_response})
 
-        # Optional: route to ID check if AI suggests it
-        if "student id" in ai_reply.lower() or "your id" in ai_reply.lower():
-            st.session_state.stage = "awaiting_user_id"
+    # Sidebar with info
+    with st.sidebar:
+        st.markdown("### 🔧 Available Services")
+        st.markdown("""
+        - 🔑 **Password Reset**
+        - 🔓 **Account Unlock** 
+        - 📱 **MFA Reset**
+        """)
+        
+        st.markdown("### 📋 What You'll Need")
+        st.markdown("""
+        - Student ID
+        - Full name
+        - Postcode
+        - Date of birth
+        - Phone number
+        """)
+        
+        if st.button("🗑️ Clear Chat"):
+            st.session_state.messages = [
+                {
+                    "role": "assistant", 
+                    "content": "👋 Hello! I'm your AI IT assistant. I can help with:\n\n• **Password resets**\n• **Locked accounts**\n• **MFA (Multi-Factor Authentication) issues**\n\nWhat can I help you with today?"
+                }
+            ]
+            st.session_state.chat_history = []
+            st.rerun()
 
-    elif stage == "awaiting_user_id":
-        user_id = user_input.strip()
-        if user_id in user_data:
-            st.session_state.user_id = user_id
-            respond("Thanks. It looks like you've entered the wrong password too many times. Have you forgotten your password? (yes/no)")
-            st.session_state.stage = "awaiting_forgot_password"
-        else:
-            respond("I couldn't find that student ID. Please try again.")
-
-    elif stage == "awaiting_forgot_password":
-        if user_input.lower() == "no":
-            respond("Okay, I’ve unlocked your account. Please try logging in again.")
-            st.session_state.stage = "done"
-        elif user_input.lower() == "yes":
-            respond("Let’s reset your password. First, please provide your full name.")
-            st.session_state.stage = "verifying_identity"
-            st.session_state.identity_step = "full_name"
-        else:
-            respond("Please reply with 'yes' or 'no'.")
-
-    elif stage == "verifying_identity":
-        current_step = st.session_state.identity_step
-        value = user_input.strip()
-        st.session_state.temp_data[current_step] = value
-        record = user_data[st.session_state.user_id]
-
-        def next_prompt(next_step, prompt_text):
-            st.session_state.identity_step = next_step
-            respond(prompt_text)
-
-        if current_step == "full_name":
-            if value.lower() == record["full_name"].lower():
-                next_prompt("postcode", "Thanks. Now, what is your postcode?")
-            else:
-                respond("❌ Name doesn't match our records. Please contact the IT service desk.")
-                st.session_state.stage = "done"
-
-        elif current_step == "postcode":
-            if value.lower() == record["postcode"].lower():
-                next_prompt("dob", "What is your date of birth? (YYYY-MM-DD)")
-            else:
-                respond("❌ Postcode doesn't match our records. Please contact the IT service desk.")
-                st.session_state.stage = "done"
-
-        elif current_step == "dob":
-            if value == record["dob"]:
-                next_prompt("phone", "Finally, what is your phone number?")
-            else:
-                respond("❌ Date of birth doesn't match our records. Please contact the IT service desk.")
-                st.session_state.stage = "done"
-
-        elif current_step == "phone":
-            if value == record["phone"]:
-                respond("✅ Identity verified. Please provide a mobile number where we can send your new password.")
-                st.session_state.stage = "awaiting_mobile"
-            else:
-                respond("❌ Phone number doesn't match our records. Please contact the IT service desk.")
-                st.session_state.stage = "done"
-
-    elif stage == "awaiting_mobile":
-        phone = user_input.strip()
-        respond(f"✅ Password reset to `TempPass123!`. A text message has been sent to {phone}.")
-        st.session_state.stage = "done"
-
-    elif stage == "done":
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        ai_reply = get_ai_response(user_input, st.session_state.chat_history)
-        st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
-        respond(ai_reply)
+if __name__ == "__main__":
+    main()
