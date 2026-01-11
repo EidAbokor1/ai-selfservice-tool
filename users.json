@@ -7,7 +7,7 @@
     "email": "alex.smith@university.ac.uk",
     "password": "Welcome123!",
     "account_locked": false,
-    "mfa_enabled": true
+    "mfa_enabled": false
   },
   "u67890": {
     "full_name": "Sara Khan",

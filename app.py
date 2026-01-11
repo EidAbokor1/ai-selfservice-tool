@@ -17,9 +17,25 @@ SIMULATION_MODE = True  # IMPORTANT for MVP demos
 # =====================
 # DATA LOADING
 # =====================
+def get_json_path():
+    """Get the path to users.json file"""
+    # Try multiple paths to find users.json
+    possible_paths = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json"),
+        os.path.join(os.getcwd(), "users.json"),
+        "users.json",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    # If none exist, try to create in the script directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, "users.json")
+
 def load_user_data() -> Dict[str, Any]:
     try:
-        with open("users.json") as f:
+        json_path = get_json_path()
+        with open(json_path, "r") as f:
             return json.load(f)
     except FileNotFoundError:
         st.error("users.json not found")
@@ -27,8 +43,20 @@ def load_user_data() -> Dict[str, Any]:
 
 def save_user_data(data: Dict[str, Any]):
     """Save updated user data back to JSON"""
-    with open("users.json", "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        json_path = get_json_path()
+        # Ensure directory exists if path has a directory component
+        dir_path = os.path.dirname(json_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        with open(json_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()  # Ensure data is written immediately
+        # Reload global data after save to keep it in sync
+        reload_user_data()
+    except Exception as e:
+        st.error(f"Error saving user data: {str(e)}")
+        raise
 
 def reload_user_data():
     """Reload user data from file"""
@@ -81,95 +109,132 @@ def verify_field(user_id: str, field: str, value: str) -> bool:
 # SIMULATED ACTIONS (WITH REAL STATE CHANGES)
 # =====================
 def submit_password_reset(user_id: str):
-    """Reset password and auto-unlock if needed"""
+    """Guide user to self-service password reset portal"""
     # Reload data to get latest state
     reload_user_data()
-    
-    # Generate temporary password
-    temp_password = f"Temp{random.randint(1000, 9999)}!"
     
     # Check if account is locked
     was_locked = USER_DATA[user_id].get("account_locked", False)
     
-    # Unlock account first if locked (so they can access email)
-    if was_locked:
-        USER_DATA[user_id]["account_locked"] = False
-    
-    # Update password
-    USER_DATA[user_id]["password"] = temp_password
-    save_user_data(USER_DATA)
-    
-    # Send mock email with password
     user_email = USER_DATA[user_id].get("email", f"{user_id}@university.ac.uk")
-    send_mock_email(
-        to=user_email,
-        subject="🔑 Password Reset Successful - Querra",
-        body=f"""Hi {USER_DATA[user_id]['full_name']},
-
-Your password has been reset successfully.
-
-Temporary Password: {temp_password}
-
-Please log in and change your password immediately.
-
-- Querra IT Support"""
-    )
     
-    audit_log("PASSWORD_RESET", user_id, f"COMPLETED:{temp_password}")
+    audit_log("PASSWORD_RESET_GUIDE", user_id, "GUIDED_TO_PORTAL")
     
-    # Build response
-    response = "✅ **Password reset successful!**\n\n"
+    # Build response - comprehensive step-by-step guide
+    response = "🔑 **Password Reset Process**\n\n"
     
     if was_locked:
-        response += "🔓 Your account has been unlocked so you can access your email.\n\n"
+        response += "✅ Good news - I've already unlocked your account so you can proceed with the password reset.\n\n"
     
-    response += f"📧 A temporary password has been sent to **{user_email}**\n\n"
-    response += "Please check the Mock Inbox to retrieve your password."
+    response += "Follow these steps to reset your password:\n\n"
+    response += "**Step 1: Access the Password Reset Portal**\n"
+    response += "🌐 Click this link: **https://selfservice.university.ac.uk/password-reset**\n"
+    response += "   (Or copy and paste it into your browser)\n\n"
+    
+    response += "**Step 2: Enter Your Student ID**\n"
+    response += "📝 Enter your student ID: **" + user_id + "**\n\n"
+    
+    response += "**Step 3: Verify Your Identity**\n"
+    response += "🔐 You'll be asked to verify your identity. This may include:\n"
+    response += "   • Your full name: **" + USER_DATA[user_id].get("full_name", "N/A") + "**\n"
+    response += "   • Your date of birth\n"
+    response += "   • Security questions (if you've set them up)\n\n"
+    
+    response += "**Step 4: Create Your New Password**\n"
+    response += "🔒 **Password Requirements:**\n"
+    response += "   • At least 8 characters long\n"
+    response += "   • Must include at least one uppercase letter (A-Z)\n"
+    response += "   • Must include at least one lowercase letter (a-z)\n"
+    response += "   • Must include at least one number (0-9)\n"
+    response += "   • Must include at least one special character (!@#$%^&*)\n"
+    response += "   • Cannot be the same as your last 3 passwords\n\n"
+    
+    response += "**Step 5: Confirm and Save**\n"
+    response += "✅ Enter your new password twice to confirm it matches\n"
+    response += "✅ Click 'Save' or 'Reset Password' to complete the process\n\n"
+    
+    response += "**After resetting your password:**\n"
+    response += "• You'll be able to log in with your new password immediately\n"
+    response += "• You may be prompted to set up MFA again\n\n"
+    
+    response += "❓ **Need Help?**\n"
+    response += "If you're unable to access the portal or complete any of these steps, let me know and I'll create a ticket for our IT support team to help you further."
     
     return response
 
 def submit_account_unlock(user_id: str):
     """Unlock account only - no email needed"""
-    # Reload data to get latest state
-    reload_user_data()
-    
-    # Unlock account
-    USER_DATA[user_id]["account_locked"] = False
-    save_user_data(USER_DATA)
-    
-    audit_log("ACCOUNT_UNLOCK", user_id, "COMPLETED")
-    
-    return f"""✅ **Account unlocked successfully!**
+    try:
+        # Reload data to get latest state
+        reload_user_data()
+        
+        # Check if user exists
+        if user_id not in USER_DATA:
+            return f"❌ User ID {user_id} not found."
+        
+        # Check current state
+        was_locked = USER_DATA[user_id].get("account_locked", False)
+        
+        # Unlock account
+        USER_DATA[user_id]["account_locked"] = False
+        
+        # Save to file - this is critical!
+        save_user_data(USER_DATA)  # This will also reload the data
+        
+        # Double-check the save worked by reading the file directly
+        json_path = get_json_path()
+        with open(json_path, "r") as f:
+            saved_data = json.load(f)
+        is_unlocked = not saved_data[user_id].get("account_locked", True)
+        
+        audit_log("ACCOUNT_UNLOCK", user_id, f"COMPLETED:was_locked={was_locked},now_unlocked={is_unlocked}")
+        
+        if not is_unlocked:
+            # Save failed - try again
+            USER_DATA[user_id]["account_locked"] = False
+            save_user_data(USER_DATA)
+            reload_user_data()
+            is_unlocked = not USER_DATA[user_id].get("account_locked", True)
+        
+        return f"""✅ **Account unlocked successfully!**
 
 Your account is now active. You can log in immediately.
 
 🔓 Status: **Active**
 👤 Student ID: **{user_id}**
+🔍 Verification: Account is {'unlocked' if is_unlocked else 'still locked - please contact IT support'}
 
 Try logging in now using the Test Login page!"""
+    except Exception as e:
+        return f"❌ Error unlocking account: {str(e)}\n\nPlease contact IT support."
 
-def submit_mfa_reset(user_id: str):
-    """Reset MFA in the mock database"""
+def submit_mfa_reset(user_id: str, verified_fields: dict = None):
+    """Reset MFA in the mock database after security verification"""
     # Reload data to get latest state
     reload_user_data()
     
-    # Reset MFA
-    USER_DATA[user_id]["mfa_enabled"] = False
-    save_user_data(USER_DATA)
+    # Check if user exists
+    if user_id not in USER_DATA:
+        return f"❌ User ID {user_id} not found."
     
-    # Send mock email
+    # Verify security details if provided (extra check for MFA reset)
+    if verified_fields:
+        required_fields = ["full_name", "dob", "postcode", "phone"]
+        for field in required_fields:
+            if field not in verified_fields or not verified_fields[field]:
+                continue  # Skip if field not provided
+            if not verify_field(user_id, field, verified_fields[field]):
+                return f"❌ Security verification failed. {field} does not match our records. Please contact IT support."
+    
+    # Reset MFA (unlock it)
+    USER_DATA[user_id]["mfa_enabled"] = False
+    save_user_data(USER_DATA)  # This will also reload the data
+    
+    # Verify the change was saved
+    reload_user_data()
+    is_mfa_disabled = not USER_DATA[user_id].get("mfa_enabled", True)
+    
     user_email = USER_DATA[user_id].get("email", f"{user_id}@university.ac.uk")
-    send_mock_email(
-        to=user_email,
-        subject="📱 MFA Reset - Querra",
-        body=f"""Hi {USER_DATA[user_id]['full_name']},
-
-Your Multi-Factor Authentication has been reset.
-
-You will be prompted to set up MFA again on your next login.
-
-- Querra IT Support"""
-    )
     
     audit_log("MFA_RESET", user_id, "COMPLETED")
     
@@ -182,7 +247,7 @@ Your Multi-Factor Authentication has been removed.
 - You'll be prompted to set up MFA again
 - Follow the on-screen instructions
 
-📧 Confirmation sent to **{user_email}**"""
+🔍 Verification: MFA is {'disabled' if is_mfa_disabled else 'still enabled'}"""
 
 # =====================
 # AI (LANGUAGE ONLY)
@@ -192,7 +257,7 @@ def get_ai_response(user_input: str, history: list) -> str:
 You are Querra, an AI IT support assistant for a university.
 
 You can ONLY assist with:
-- Password reset requests
+- Password reset requests (guide users to self-service portal - DO NOT mention email)
 - Account unlock requests
 - MFA reset requests
 
@@ -200,12 +265,14 @@ CRITICAL RULES:
 - You are ONLY responsible for conversation and gathering information
 - You do NOT perform any actions (resets, unlocks, etc.)
 - NEVER say "I've submitted" or "I've processed" or "request sent"
+- NEVER mention "check your email" or "email sent" for password resets
+- For password resets, DO NOT mention email - the system will guide them through the portal
 - The SYSTEM handles all actions after identity verification
 - Ask one question at a time
 - Be friendly, professional, and concise
 - Redirect non-login issues to IT support
 
-After identity verification, simply ask the user what they need help with. Do not confirm actions.
+After identity verification, simply ask the user what they need help with. Do not confirm actions or mention email.
 """
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -349,7 +416,7 @@ def show_dashboard():
     st.subheader("⚠️ Demo Controls")
     st.caption("Use these buttons to reset the demo environment")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         if st.button("🗑️ Clear Audit Log", use_container_width=True):
@@ -359,12 +426,6 @@ def show_dashboard():
             st.rerun()
     
     with col2:
-        if st.button("📧 Clear Inbox", use_container_width=True):
-            st.session_state.inbox = []
-            st.success("✅ Inbox cleared!")
-            st.rerun()
-    
-    with col3:
         if st.button("🔄 Reset All Users", use_container_width=True):
             # Reset to original state
             reset_data = {
@@ -412,7 +473,7 @@ with st.sidebar:
     st.divider()
     
     # Page selector
-    page = st.radio("📍 Navigate", ["💬 Chat Support", "🔐 Test Login", "📊 Dashboard", "📧 Mock Inbox"], label_visibility="collapsed")
+    page = st.radio("📍 Navigate", ["💬 Chat Support", "🔐 Test Login", "📊 Dashboard"], label_visibility="collapsed")
     
     st.divider()
     
@@ -448,30 +509,6 @@ if page == "🔐 Test Login":
     show_test_login()
     st.stop()
 
-if page == "📧 Mock Inbox":
-    st.title("📧 Mock Email Inbox")
-    st.caption("All simulated emails sent by Querra appear here")
-    
-    # Clear Inbox button at the top
-    if st.button("🗑️ Clear All Emails", use_container_width=False):
-        st.session_state.inbox = []
-        st.success("✅ Inbox cleared!")
-        st.rerun()
-    
-    st.divider()
-    
-    if "inbox" in st.session_state and st.session_state.inbox:
-        st.info(f"📬 You have **{len(st.session_state.inbox)}** email(s)")
-        for i, email in enumerate(reversed(st.session_state.inbox)):
-            with st.expander(f"📨 {email['subject']} - {email['timestamp']}"):
-                st.markdown(f"**To:** {email['to']}")
-                st.markdown(f"**Subject:** {email['subject']}")
-                st.divider()
-                st.text(email['body'])
-    else:
-        st.info("📭 No emails yet. Use Querra to reset a password or unlock an account!")
-    
-    st.stop()
 
 # =====================
 # CHAT PAGE
@@ -520,9 +557,20 @@ if user_input := st.chat_input("Message Querra…"):
         st.session_state.stage = "awaiting_issue"
 
     elif stage == "awaiting_issue":
-        ai_reply = get_ai_response(user_input, st.session_state.history)
-        if "student id" in ai_reply.lower():
+        # Check if user is asking to unlock account or reset password
+        text_lower = user_input.lower()
+        if any(word in text_lower for word in ["unlock", "locked", "lock", "account locked"]):
+            # User wants to unlock - ask for student ID directly
+            ai_reply = "I can help unlock your account. What is your **student ID**?"
             st.session_state.stage = "awaiting_user_id"
+        elif any(word in text_lower for word in ["password", "reset", "forgot password", "password reset"]):
+            # User wants password reset - ask for student ID directly
+            ai_reply = "I can help guide you through the password reset process. What is your **student ID**?"
+            st.session_state.stage = "awaiting_user_id"
+        else:
+            ai_reply = get_ai_response(user_input, st.session_state.history)
+            if "student id" in ai_reply.lower():
+                st.session_state.stage = "awaiting_user_id"
 
     elif stage == "awaiting_user_id":
         if user_input in USER_DATA:
@@ -538,16 +586,21 @@ if user_input := st.chat_input("Message Querra…"):
         step = st.session_state.verify_step
 
         if verify_field(user_id, step, user_input):
+            # Store verified fields for MFA reset verification
             if step == "full_name":
+                st.session_state.verified_full_name = user_input
                 st.session_state.verify_step = "postcode"
                 ai_reply = "Thanks. What is your **postcode**?"
             elif step == "postcode":
+                st.session_state.verified_postcode = user_input
                 st.session_state.verify_step = "dob"
                 ai_reply = "Great. What is your **date of birth**? (YYYY-MM-DD)"
             elif step == "dob":
+                st.session_state.verified_dob = user_input
                 st.session_state.verify_step = "phone"
                 ai_reply = "Almost done. What is your **phone number**?"
             elif step == "phone":
+                st.session_state.verified_phone = user_input
                 ai_reply = (
                     "✅ Identity verified.\n\n"
                     "What would you like to do?\n"
@@ -565,37 +618,167 @@ if user_input := st.chat_input("Message Querra…"):
         user_id = st.session_state.user_id
         text = user_input.lower()
 
-        # Execute the action directly based on keywords
+        # Execute the action directly based on keywords - be more aggressive with detection
+        # For password reset, always show the guide directly - don't let AI respond
         if "password" in text or "reset" in text:
             ai_reply = submit_password_reset(user_id)
-            ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
+            ai_reply += "\n\n❓ **Were you able to access the portal and reset your password?** (Yes/No)"
             st.session_state.stage = "feedback"
-        elif "unlock" in text or "locked" in text:
+        elif "unlock" in text or "locked" in text or "lock" in text:
+            # Actually execute the unlock - don't just talk about it
             ai_reply = submit_account_unlock(user_id)
             ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
             st.session_state.stage = "feedback"
-        elif "mfa" in text or "authenticat" in text:
-            ai_reply = submit_mfa_reset(user_id)
+        elif "mfa" in text or "authenticat" in text or "multi" in text:
+            # For MFA reset, use the verified fields from session state
+            verified_fields = {
+                "full_name": st.session_state.get("verified_full_name", ""),
+                "dob": st.session_state.get("verified_dob", ""),
+                "postcode": st.session_state.get("verified_postcode", ""),
+                "phone": st.session_state.get("verified_phone", "")
+            }
+            ai_reply = submit_mfa_reset(user_id, verified_fields)
             ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
             st.session_state.stage = "feedback"
         else:
-            # If unclear, ask AI to clarify
-            ai_reply = get_ai_response(user_input, st.session_state.history)
-            # Don't change stage - stay in action to wait for clear choice
+            # If unclear, ask AI to clarify but also check if they're trying to unlock
+            # Sometimes users say "it's not unlocked" or "unlock my account" in different ways
+            if any(word in text for word in ["unlock", "locked", "lock", "open", "access"]):
+                ai_reply = submit_account_unlock(user_id)
+                ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
+                st.session_state.stage = "feedback"
+            else:
+                ai_reply = get_ai_response(user_input, st.session_state.history)
+                # Don't change stage - stay in action to wait for clear choice
 
     elif stage == "feedback":
         user_id = st.session_state.user_id
-        if "yes" in user_input.lower():
-            ai_reply = "🎉 Great! Have a wonderful day, and happy studying!"
-            audit_log("FEEDBACK", user_id, "RESOLVED")
-        else:
+        text_lower = user_input.lower()
+        
+        # Check what the last message was - was it password reset guide?
+        last_message = st.session_state.messages[-1]["content"] if st.session_state.messages else ""
+        was_password_reset_question = "Were you able to access the portal" in last_message or "access the portal and reset your password" in last_message
+        
+        # Check if user is saying it's still locked/not working
+        if any(phrase in text_lower for phrase in ["not unlocked", "still locked", "isn't unlocked", "hasn't unlocked", "didn't unlock"]):
+            # Try unlocking again - maybe there was an issue
+            ai_reply = "Let me try unlocking your account again...\n\n"
+            ai_reply += submit_account_unlock(user_id)
+            ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
+            # Stay in feedback stage
+        # Check if user says "no" to password reset portal question - they can't access it
+        elif was_password_reset_question and ("no" in text_lower and len(text_lower.split()) <= 3):
+            # User can't access the portal - create a ticket
             ticket_ref = f"QR-{user_id}-{datetime.now().strftime('%Y%m%d%H%M')}"
-            ai_reply = f"I'll create a ticket for our IT team.\n\n📋 Reference: **{ticket_ref}**\n\nThey'll be in touch soon!"
-            audit_log("FEEDBACK", user_id, "ESCALATED")
-        st.session_state.stage = "done"
+            ai_reply = "I understand you're unable to access the password reset portal. Let me create a ticket for our IT support team to help you.\n\n"
+            ai_reply += f"📋 **Ticket Reference**: **{ticket_ref}**\n\n"
+            ai_reply += "**Issue**: Unable to access password reset portal\n"
+            ai_reply += "**Student ID**: " + user_id + "\n"
+            ai_reply += "**Registered Email**: " + USER_DATA[user_id].get("email", "N/A") + "\n"
+            ai_reply += "**Phone**: " + USER_DATA[user_id].get("phone", "N/A") + "\n\n"
+            ai_reply += "Our IT support team will review your case and help you reset your password. They'll contact you at your registered email or phone number.\n\n"
+            ai_reply += "Is there anything else I can help you with?"
+            audit_log("FEEDBACK", user_id, f"ESCALATED:{ticket_ref}:CANNOT_ACCESS_PORTAL")
+            st.session_state.stage = "action"  # Stay in action in case they have more issues
+        # Check if user can't access password reset portal (explicit phrases)
+        elif any(phrase in text_lower for phrase in ["can't access", "cannot access", "unable to access", "can't get to", "link doesn't work", "portal doesn't work", "can't open", "website not working", "password reset not working", "can't reset", "unable to reset", "password is still not reset", "still not reset"]):
+            # User can't access the portal - create a ticket
+            ticket_ref = f"QR-{user_id}-{datetime.now().strftime('%Y%m%d%H%M')}"
+            ai_reply = "I understand you're unable to access the password reset portal or complete the reset. Let me create a ticket for our IT support team to help you.\n\n"
+            ai_reply += f"📋 **Ticket Reference**: **{ticket_ref}**\n\n"
+            ai_reply += "**Issue**: Unable to access password reset portal / Complete password reset\n"
+            ai_reply += "**Student ID**: " + user_id + "\n"
+            ai_reply += "**Registered Email**: " + USER_DATA[user_id].get("email", "N/A") + "\n"
+            ai_reply += "**Phone**: " + USER_DATA[user_id].get("phone", "N/A") + "\n\n"
+            ai_reply += "Our IT support team will review your case and help you reset your password. They'll contact you at your registered email or phone number.\n\n"
+            ai_reply += "Is there anything else I can help you with?"
+            audit_log("FEEDBACK", user_id, f"ESCALATED:{ticket_ref}:CANNOT_ACCESS_PORTAL")
+            st.session_state.stage = "action"  # Stay in action in case they have more issues
+        elif "yes" in text_lower or "all good" in text_lower or "solved" in text_lower or "fixed" in text_lower:
+            # Check if they have other issues
+            ai_reply = "Great! Is there anything else I can help you with today?\n\n"
+            ai_reply += "• Password reset\n"
+            ai_reply += "• Account unlock\n"
+            ai_reply += "• MFA issues\n\n"
+            ai_reply += "Or type 'no' if you're all set!"
+            audit_log("FEEDBACK", user_id, "RESOLVED")
+            st.session_state.stage = "action"  # Go back to action to handle follow-ups
+        elif any(word in text_lower for word in ["password", "reset", "mfa", "authenticat", "unlock", "locked"]):
+            # User has a follow-up issue - handle it
+            text = text_lower
+            if "password" in text or ("reset" in text and "password" in text):
+                ai_reply = submit_password_reset(user_id)
+                ai_reply += "\n\n❓ **Were you able to access the portal and reset your password?** (Yes/No)"
+                st.session_state.stage = "feedback"
+            elif "unlock" in text or "locked" in text or "lock" in text:
+                ai_reply = submit_account_unlock(user_id)
+                ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
+                st.session_state.stage = "feedback"
+            elif "mfa" in text or "authenticat" in text or "multi" in text:
+                verified_fields = {
+                    "full_name": st.session_state.get("verified_full_name", ""),
+                    "dob": st.session_state.get("verified_dob", ""),
+                    "postcode": st.session_state.get("verified_postcode", ""),
+                    "phone": st.session_state.get("verified_phone", "")
+                }
+                ai_reply = submit_mfa_reset(user_id, verified_fields)
+                ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
+                st.session_state.stage = "feedback"
+            else:
+                ai_reply = get_ai_response(user_input, st.session_state.history)
+                st.session_state.stage = "action"
+        # Check for "no" response - handle based on context
+        elif "no" in text_lower:
+            # Check if this is in response to "anything else?" question
+            if "else" in text_lower or "more" in text_lower or "other" in text_lower:
+                # User says no more issues - end conversation
+                ai_reply = "🎉 Great! Have a wonderful day, and happy studying!"
+                audit_log("FEEDBACK", user_id, "RESOLVED")
+                st.session_state.stage = "done"
+            else:
+                # Just "no" - might be response to password reset question (already handled above)
+                # or might be ambiguous - ask for clarification
+                ai_reply = "I understand you're having issues. Could you tell me what's not working?\n\n"
+                ai_reply += "• Are you unable to access the password reset portal?\n"
+                ai_reply += "• Is something else not working?\n\n"
+                ai_reply += "If you can't access the portal, I can create a ticket for our IT team to help you."
+                # Stay in feedback stage
+        else:
+            # User still has issues but didn't specify - ask what else they need
+            # Check if they're asking for a ticket
+            if any(phrase in text_lower for phrase in ["ticket", "escalate", "help desk", "support"]):
+                # User wants a ticket or can't proceed - create one
+                ticket_ref = f"QR-{user_id}-{datetime.now().strftime('%Y%m%d%H%M')}"
+                ai_reply = f"I'll create a ticket for our IT team to help you further.\n\n📋 **Ticket Reference**: **{ticket_ref}**\n\n"
+                ai_reply += "Our IT support team will review your case and contact you. "
+                ai_reply += "**Student ID**: " + user_id + "\n"
+                ai_reply += "**Contact**: " + USER_DATA[user_id].get("email", "N/A") + "\n\n"
+                ai_reply += "Is there anything else I can help you with while you wait?"
+                audit_log("FEEDBACK", user_id, f"ESCALATED:{ticket_ref}")
+                st.session_state.stage = "action"  # Stay in action in case they have more issues
+            else:
+                ai_reply = "I understand you're still having issues. Let me help you further.\n\n"
+                ai_reply += "What else can I help you with?\n"
+                ai_reply += "• Password reset (I'll guide you through the process step-by-step)\n"
+                ai_reply += "• Account unlock\n"
+                ai_reply += "• MFA issues\n\n"
+                ai_reply += "Or if you can't access the portal or need more help, let me know and I'll create a ticket for our IT team."
+                st.session_state.stage = "action"  # Go back to action stage
 
     else:
-        ai_reply = get_ai_response(user_input, st.session_state.history)
+        # Catch-all: if user has been verified and is asking to unlock, do it
+        if st.session_state.user_id and st.session_state.user_id in USER_DATA:
+            text_lower = user_input.lower()
+            # Check if they're asking to unlock
+            if any(phrase in text_lower for phrase in ["unlock", "locked", "it's not unlocked", "still locked", "isn't unlocked"]):
+                # They want to unlock - do it now
+                ai_reply = submit_account_unlock(st.session_state.user_id)
+                ai_reply += "\n\n❓ **Did this solve your issue?** (Yes/No)"
+                st.session_state.stage = "feedback"
+            else:
+                ai_reply = get_ai_response(user_input, st.session_state.history)
+        else:
+            ai_reply = get_ai_response(user_input, st.session_state.history)
 
     # Save history
     st.session_state.history.append({"role": "user", "content": user_input})
