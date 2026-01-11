@@ -3,12 +3,20 @@
     "full_name": "Alex Smith",
     "dob": "2016-04-22",
     "postcode": "SW1A 1AA",
-    "phone": "07700900123"
+    "phone": "07700900123",
+    "email": "alex.smith@university.ac.uk",
+    "password": "Welcome123!",
+    "account_locked": false,
+    "mfa_enabled": true
   },
   "u67890": {
     "full_name": "Sara Khan",
     "dob": "2002-09-15",
     "postcode": "E1 6AN",
-    "phone": "07700900234"
+    "phone": "07700900234",
+    "email": "sara.khan@university.ac.uk",
+    "password": "Student456!",
+    "account_locked": true,
+    "mfa_enabled": true
   }
 }
