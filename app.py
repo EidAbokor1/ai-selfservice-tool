@@ -15,6 +15,8 @@ load_dotenv()
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
 AUDIT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit.log")
+MAX_VERIFY_FAILURES = 3
+NUM_VERIFY_QUESTIONS = 2  # Ask 2 random questions from the pool
 
 # =====================
 # DATA
@@ -40,22 +42,15 @@ def audit_log(action: str, user_id: str, status: str):
 # PII SANITISATION
 # =====================
 def sanitise_for_llm(history):
-    """Strip PII from chat history before sending to external LLM.
-    Replaces student IDs, names, postcodes, DOBs, phone numbers, and emails
-    so no personal data leaves the system."""
+    """Strip PII from chat history before sending to external LLM."""
     sanitised = []
     for msg in history:
         text = msg["content"]
-        # Student IDs (u followed by digits)
         text = re.sub(r"\bu\d{4,}\b", "[STUDENT_ID]", text, flags=re.IGNORECASE)
-        # UK postcodes
         text = re.sub(r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b", "[POSTCODE]", text, flags=re.IGNORECASE)
-        # Dates (YYYY-MM-DD)
         text = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "[DOB]", text)
-        # UK phone numbers
         text = re.sub(r"\b0\d{10}\b", "[PHONE]", text)
         text = re.sub(r"\b07\d{9}\b", "[PHONE]", text)
-        # Email addresses
         text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", "[EMAIL]", text)
         sanitised.append({"role": msg["role"], "content": text})
     return sanitised
@@ -112,6 +107,13 @@ def do_mfa_reset(user_id):
         "Let me know if you need help with anything else!"
     )
 
+def freeze_account(user_id):
+    """Lock account after too many failed verification attempts."""
+    users = load_users()
+    users[user_id]["account_locked"] = True
+    save_users(users)
+    audit_log("ACCOUNT_FROZEN", user_id, "LOCKED_AFTER_FAILED_VERIFICATION")
+
 # =====================
 # AI RESPONSE
 # =====================
@@ -120,21 +122,23 @@ def get_ai_response(user_input, history):
 You help with: password resets, account unlocks, and MFA resets.
 Keep responses short and helpful. Ask for the student ID if needed.
 Redirect non-login issues to support@university.ac.uk.
-NEVER ask for or repeat any personal information like names, dates of birth, or phone numbers."""
+NEVER ask for or repeat any personal information like names, dates of birth, or phone numbers.
+You CANNOT perform any action until identity is verified. Do not reveal any student data."""
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(sanitise_for_llm(history))
     messages.append({"role": "user", "content": user_input})
 
     try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={"model": "deepseek/deepseek-chat-v3", "messages": messages, "temperature": 0.3, "max_tokens": 200},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"]
+        with st.spinner("Querra is thinking..."):
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                json={"model": "deepseek/deepseek-chat-v3", "messages": messages, "temperature": 0.3, "max_tokens": 200},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"]
     except Exception:
         pass
     return "⚠️ I'm having trouble connecting. Please try again."
@@ -142,13 +146,18 @@ NEVER ask for or repeat any personal information like names, dates of birth, or 
 # =====================
 # IDENTITY VERIFICATION
 # =====================
-VERIFY_STEPS = ["full_name", "postcode", "dob", "phone"]
-VERIFY_PROMPTS = {
+ALL_VERIFY_FIELDS = {
     "full_name": "What is your **full name**?",
     "postcode": "What is your **postcode**?",
     "dob": "What is your **date of birth**? (YYYY-MM-DD)",
     "phone": "What is your **phone number**?",
 }
+
+def pick_random_questions():
+    """Pick a random subset of verification questions."""
+    fields = list(ALL_VERIFY_FIELDS.keys())
+    chosen = random.sample(fields, NUM_VERIFY_QUESTIONS)
+    return chosen
 
 def verify_field(user_id, field, value):
     users = load_users()
@@ -156,6 +165,17 @@ def verify_field(user_id, field, value):
     if not record:
         return False
     return record.get(field, "").lower() == value.strip().lower()
+
+# =====================
+# UNIVERSITY SYSTEMS
+# =====================
+SYSTEMS = {
+    "lms": "Learning Management System (Moodle/Canvas)",
+    "email": "University Email (Outlook)",
+    "library": "Library Portal",
+    "wifi": "Campus Wi-Fi / Eduroam",
+    "other": "Other",
+}
 
 # =====================
 # STREAMLIT UI
@@ -232,6 +252,9 @@ if "messages" not in st.session_state:
     st.session_state.stage = "greeting"
     st.session_state.user_id = ""
     st.session_state.verify_index = 0
+    st.session_state.verify_failures = 0
+    st.session_state.verify_questions = []
+    st.session_state.system_context = ""
 
 # Display chat history
 for msg in st.session_state.messages:
@@ -253,71 +276,125 @@ if user_input := st.chat_input("Message Querra…"):
     # --- GREETING / AWAITING ISSUE ---
     if stage in ("greeting", "awaiting_issue"):
         if any(w in text for w in ["password", "reset", "forgot"]):
-            reply = "I can help with that. What's your **student ID**?"
-            st.session_state.stage = "awaiting_id"
+            reply = "I can help with that. Which system are you trying to access?\n\n"
+            reply += "• **LMS** (Moodle/Canvas)\n• **Email** (Outlook)\n• **Library** portal\n• **Wi-Fi** (Eduroam)\n• **Other**"
+            st.session_state.stage = "awaiting_system"
             st.session_state.pending_action = "password"
         elif any(w in text for w in ["unlock", "locked", "lock"]):
-            reply = "I can help unlock your account. What's your **student ID**?"
-            st.session_state.stage = "awaiting_id"
+            reply = "I can help unlock your account. Which system are you trying to access?\n\n"
+            reply += "• **LMS** (Moodle/Canvas)\n• **Email** (Outlook)\n• **Library** portal\n• **Wi-Fi** (Eduroam)\n• **Other**"
+            st.session_state.stage = "awaiting_system"
             st.session_state.pending_action = "unlock"
         elif any(w in text for w in ["mfa", "authenticat", "multi-factor", "2fa"]):
-            reply = "I can help reset your MFA. What's your **student ID**?"
-            st.session_state.stage = "awaiting_id"
+            reply = "I can help reset your MFA. Which system are you trying to access?\n\n"
+            reply += "• **LMS** (Moodle/Canvas)\n• **Email** (Outlook)\n• **Library** portal\n• **Wi-Fi** (Eduroam)\n• **Other**"
+            st.session_state.stage = "awaiting_system"
             st.session_state.pending_action = "mfa"
         else:
             reply = get_ai_response(user_input, st.session_state.history)
             st.session_state.stage = "awaiting_issue"
 
+    # --- AWAITING SYSTEM SELECTION ---
+    elif stage == "awaiting_system":
+        matched = None
+        for key in SYSTEMS:
+            if key in text:
+                matched = key
+                break
+        if not matched:
+            # Try fuzzy matching common words
+            if any(w in text for w in ["moodle", "canvas", "learn"]):
+                matched = "lms"
+            elif any(w in text for w in ["outlook", "mail", "email"]):
+                matched = "email"
+            elif any(w in text for w in ["library", "book"]):
+                matched = "library"
+            elif any(w in text for w in ["wifi", "wi-fi", "eduroam", "internet"]):
+                matched = "wifi"
+            else:
+                matched = "other"
+
+        st.session_state.system_context = SYSTEMS.get(matched, "Other")
+        reply = f"Got it — **{st.session_state.system_context}**.\n\nWhat's your **student ID**?"
+        st.session_state.stage = "awaiting_id"
+
     # --- AWAITING STUDENT ID ---
     elif stage == "awaiting_id":
         users = load_users()
-        if user_input.strip() in users:
-            st.session_state.user_id = user_input.strip()
-            st.session_state.verify_index = 0
-            step = VERIFY_STEPS[0]
-            reply = f"Got it. Let's verify your identity.\n\n{VERIFY_PROMPTS[step]}"
-            st.session_state.stage = "verifying"
-            audit_log("VERIFICATION_START", st.session_state.user_id, "STARTED")
+        uid = user_input.strip()
+        if uid in users:
+            # Check if account is frozen from previous failed attempts
+            if users[uid].get("account_locked") and st.session_state.get("pending_action") != "unlock":
+                reply = "🔒 This account is currently locked. Please contact **support@university.ac.uk** for assistance."
+                st.session_state.stage = "awaiting_issue"
+            else:
+                st.session_state.user_id = uid
+                st.session_state.verify_index = 0
+                st.session_state.verify_failures = 0
+                st.session_state.verify_questions = pick_random_questions()
+                first_field = st.session_state.verify_questions[0]
+                reply = f"Let's verify your identity.\n\n{ALL_VERIFY_FIELDS[first_field]}"
+                st.session_state.stage = "verifying"
+                audit_log("VERIFICATION_START", uid, "STARTED")
         else:
             reply = "I couldn't find that student ID. Please check and try again."
 
     # --- IDENTITY VERIFICATION ---
     elif stage == "verifying":
         idx = st.session_state.verify_index
-        field = VERIFY_STEPS[idx]
+        questions = st.session_state.verify_questions
+        field = questions[idx]
 
         if verify_field(st.session_state.user_id, field, user_input):
             idx += 1
             st.session_state.verify_index = idx
 
-            if idx < len(VERIFY_STEPS):
-                next_field = VERIFY_STEPS[idx]
-                reply = f"✅ Correct.\n\n{VERIFY_PROMPTS[next_field]}"
+            if idx < len(questions):
+                next_field = questions[idx]
+                reply = f"✅ Correct.\n\n{ALL_VERIFY_FIELDS[next_field]}"
             else:
                 # All verified — perform the action
                 action = st.session_state.get("pending_action", "")
                 uid = st.session_state.user_id
-                audit_log("VERIFICATION_COMPLETE", uid, "VERIFIED")
+                system = st.session_state.system_context
+                audit_log("VERIFICATION_COMPLETE", uid, f"VERIFIED|system={system}")
 
-                if action == "password":
-                    reply = f"✅ Identity verified.\n\n{do_password_reset(uid)}"
-                elif action == "unlock":
-                    reply = f"✅ Identity verified.\n\n{do_account_unlock(uid)}"
-                elif action == "mfa":
-                    reply = f"✅ Identity verified.\n\n{do_mfa_reset(uid)}"
-                else:
-                    reply = (
-                        "✅ Identity verified.\n\nWhat would you like to do?\n"
-                        "• Reset password\n• Unlock account\n• Reset MFA"
-                    )
-                    st.session_state.stage = "choose_action"
+                with st.spinner("Querra is processing your request..."):
+                    if action == "password":
+                        reply = f"✅ Identity verified.\n\n{do_password_reset(uid)}"
+                    elif action == "unlock":
+                        reply = f"✅ Identity verified.\n\n{do_account_unlock(uid)}"
+                    elif action == "mfa":
+                        reply = f"✅ Identity verified.\n\n{do_mfa_reset(uid)}"
+                    else:
+                        reply = (
+                            "✅ Identity verified.\n\nWhat would you like to do?\n"
+                            "• Reset password\n• Unlock account\n• Reset MFA"
+                        )
+                        st.session_state.stage = "choose_action"
 
                 if action:
                     st.session_state.stage = "awaiting_issue"
         else:
-            audit_log("VERIFICATION_FAILED", st.session_state.user_id, f"FAILED_ON:{field}")
-            reply = "❌ That doesn't match our records. Please contact **support@university.ac.uk** for help."
-            st.session_state.stage = "awaiting_issue"
+            st.session_state.verify_failures += 1
+            failures = st.session_state.verify_failures
+            uid = st.session_state.user_id
+            remaining = MAX_VERIFY_FAILURES - failures
+
+            audit_log("VERIFICATION_FAILED", uid, f"FAILED_ON:{field}|attempt:{failures}")
+
+            if failures >= MAX_VERIFY_FAILURES:
+                # Freeze the account
+                freeze_account(uid)
+                reply = (
+                    "🚫 **Too many failed attempts.**\n\n"
+                    "For your security, this account has been locked and a high-priority ticket "
+                    "has been created for our IT team.\n\n"
+                    "Please contact **support@university.ac.uk** or call **+44 20 1234 5678** for help."
+                )
+                st.session_state.stage = "awaiting_issue"
+            else:
+                reply = f"❌ That doesn't match our records. You have **{remaining}** attempt(s) remaining.\n\nPlease try again: {ALL_VERIFY_FIELDS[field]}"
 
     # --- CHOOSE ACTION (fallback if no action was pre-selected) ---
     elif stage == "choose_action":
